@@ -4,7 +4,7 @@ from discord.ext import commands
 import requests
 
 # --- ตั้งค่าส่วนตัว ---
-TOKEN = '' 
+TOKEN = ''
 
 # ตั้งค่า Intents
 intents = discord.Intents.default()
@@ -49,7 +49,6 @@ async def clearlocal(ctx):
 # ---------------------------------------------------------
 @bot.tree.command(name="sale", description="ดูรายการเกมลดราคาแนะนำ (Steam Specials)")
 async def sale(interaction: discord.Interaction):
-    # บอก Discord ว่าขอเวลาประมวลผลแป๊บนึง
     await interaction.response.defer()
 
     url = "https://store.steampowered.com/api/featuredcategories?cc=th"
@@ -58,26 +57,43 @@ async def sale(interaction: discord.Interaction):
         data = response.json()
         items = data.get('specials', {}).get('items', [])
         
-        found_games = False
-        msg = "🔥 **แนะนำเกมลดราคา (Steam Specials)** 🔥\n"
-
+        # 1. สร้างลิสต์เปล่าเอาไว้เก็บการ์ด
+        embeds = [] 
+        
         for game in items[:5]: # ดึงมา 5 เกม
             name = game.get('name')
+            app_id = game.get('id')
             discount = game.get('discount_percent')
             original_price = game.get('original_price', 0) / 100 
             final_price = game.get('final_price', 0) / 100
-            link = f"https://store.steampowered.com/app/{game.get('id')}"
+            link = f"https://store.steampowered.com/app/{app_id}"
+            
+            # รูปปกเกม (Steam ใช้ format นี้เสมอ)
+            image_url = f"https://cdn.cloudflare.steamstatic.com/steam/apps/{app_id}/header.jpg"
 
             if discount > 0:
-                found_games = True
-                msg += (
-                    f"\n🎮 **{name}**\n"
-                    f"ลด {discount}% 🏷️ เหลือ **{final_price:,.0f} บาท** (จาก {original_price:,.0f})\n"
-                    f"[Link]({link})\n" # ใช้ Link แบบ Markdown สั้นๆ
+                # 2. สร้างการ์ด (Embed)
+                embed = discord.Embed(
+                    title=f"🔥 {name}", 
+                    url=link, 
+                    color=discord.Color.red() # สีแดงสื่อถึงของร้อน/ลดราคา
                 )
+                
+                # ใส่รายละเอียดราคา
+                embed.description = (
+                    f"ลด **{discount}%** 🏷️\n"
+                    f"เหลือ **{final_price:,.0f} บาท** (จาก ~~{original_price:,.0f}~~)"
+                )
+                
+                # ใส่รูปปกเกม
+                embed.set_image(url=image_url)
+                
+                # เพิ่มการ์ดลงในลิสต์
+                embeds.append(embed)
         
-        if found_games:
-            await interaction.followup.send(msg)
+        # 3. ส่งการ์ดทั้งหมดออกไปทีเดียว (Discord ให้ส่งได้สูงสุด 10 ใบต่อข้อความ)
+        if embeds:
+            await interaction.followup.send(content="🔥 **แนะนำเกมลดราคา (Steam Specials)**", embeds=embeds)
         else:
             await interaction.followup.send("ตอนนี้หน้าแรกยังไม่มีรายการลดราคาเด่นๆ ครับ")
 
