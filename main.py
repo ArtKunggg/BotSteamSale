@@ -2,15 +2,25 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 import requests
+import google.generativeai as genai
 
 # --- ตั้งค่าส่วนตัว ---
 TOKEN = ''
+GOOGLE_API_KEY = ''  # ใส่ API Key ของ Google Generative AI ของคุณตรงนี้
+genai.configure(api_key=GOOGLE_API_KEY)
 
 # ตั้งค่า Intents
 intents = discord.Intents.default()
 intents.message_content = True
 
+# ปรับเป็น 1.2 หรือ 1.5 (ยิ่งสูง ยิ่งสุ่มได้เกมแปลกๆ แต่ระวังมันมั่วชื่อเกมนะ)
+config = genai.types.GenerationConfig(
+    temperature=1.2, 
+)
+
 bot = commands.Bot(command_prefix='!', intents=intents)
+# เลือกใช้รุ่น Flash เพราะตอบสนองเร็วและฟรี
+model = genai.GenerativeModel('gemini-2.5-flash', generation_config=config)
 
 @bot.event
 async def on_ready():
@@ -235,6 +245,122 @@ async def online(interaction: discord.Interaction, game_name: str):
 
     except Exception as e:
         await interaction.followup.send(f"เกิดข้อผิดพลาด: {e}")
+
+# ---------------------------------------------------------
+# คำสั่ง /askgame : ให้ AI แนะนำเกม
+# ---------------------------------------------------------
+@bot.tree.command(name="askgame", description="ให้ AI แนะนำเกมตามใจคุณ (เช่น: เกมยิงซอมบี้ ภาพสวยๆ)")
+@app_commands.describe(prompt="อยากเล่นเกมแนวไหน พิมพ์บอกมาได้เลย!")
+async def askgame(interaction: discord.Interaction, prompt: str):
+    await interaction.response.defer()
+
+    # 1. สร้าง Prompt บังคับให้ AI ตอบแค่ชื่อเกม
+    system_prompt = f"""
+    คุณคือผู้เชี่ยวชาญเกม Steam
+    ผู้ใช้ต้องการหาเกมแนว: "{prompt}"
+    จงนึกถึงรายชื่อเกมที่ดีและตรงสเปคมาอย่างน้อย 10 เกม จากนั้นให้ "สุ่มเลือกตอบมาแค่ 1 เกม" (ต้องเป็นเกมที่มีขายบน Steam เท่านั้น)
+    สำคัญมาก: ให้ตอบกลับมาเป็น "ชื่อเกมภาษาอังกฤษ" เท่านั้น ห้ามมีสัญลักษณ์ ห้ามมีคำอธิบาย ห้ามมีเครื่องหมายคำพูด
+    """
+
+    try:
+        # 2. ถาม AI
+        ai_response = model.generate_content(system_prompt)
+        recommended_game = ai_response.text.strip()
+        
+        # 3. เอาชื่อเกมที่ AI แนะนำ ไปค้นหาใน Steam API
+        search_url = f"https://store.steampowered.com/api/storesearch/?term={recommended_game}&cc=th&l=thai"
+        search_res = requests.get(search_url)
+        search_data = search_res.json()
+
+        # ถ้าหาใน Steam เจอ
+        if search_data.get('total') > 0:
+            best_match = search_data.get('items')[0]
+            name = best_match.get('name')
+            app_id = best_match.get('id')
+            link = f"https://store.steampowered.com/app/{app_id}"
+            image_url = f"https://cdn.cloudflare.steamstatic.com/steam/apps/{app_id}/header.jpg"
+
+            # ตกแต่งการ์ด
+            embed = discord.Embed(
+                title=f"🤖 AI แนะนำ: {name}", 
+                description=f"คุณอยากได้แนว: *{prompt}*\nนี่คือเกมที่ AI เลือกให้ครับ!",
+                url=link, 
+                color=discord.Color.blue()
+            )
+            embed.set_image(url=image_url)
+
+            # ดึงราคา (ถ้ามี)
+            price_data = best_match.get('price')
+            if price_data:
+                final_price = price_data.get('final', 0) / 100
+                embed.add_field(name="ราคาปัจจุบัน", value=f"**{final_price:,.0f} บาท**", inline=False)
+            else:
+                embed.add_field(name="ราคา", value="ไม่มีข้อมูลราคา (อาจจะเล่นฟรี)", inline=False)
+
+            await interaction.followup.send(embed=embed)
+
+        else:
+            # ถ้า AI แนะนำชื่อเกมแปลกๆ มาแล้วหาใน Steam ไม่เจอ
+            await interaction.followup.send(f"🤖 AI แนะนำเกม: **{recommended_game}** แต่บอทหาใน Steam ไม่เจอครับ ลองเปลี่ยนคำค้นหาดูนะ")
+
+    except Exception as e:
+        await interaction.followup.send(f"❌ เกิดข้อผิดพลาดในการเชื่อมต่อ AI: {e}")
+
+# ---------------------------------------------------------
+# คำสั่ง /review : ให้ AI สรุปรีวิวเกม
+# ---------------------------------------------------------
+@bot.tree.command(name="review", description="📝 ให้ AI สรุปรีวิว จุดเด่น-จุดด้อย ของเกม")
+@app_commands.describe(game_name="ชื่อเกมที่อยากให้ AI รีวิว")
+async def review(interaction: discord.Interaction, game_name: str):
+    # บรรทัดนี้บอก Discord ว่า "รอแป๊บนึงนะ บอทกำลังคิด" (ป้องกัน error time out)
+    await interaction.response.defer()
+
+    try:
+        # 1. ค้นหาเกมใน Steam ก่อน เพื่อเอาชื่อที่ถูกต้องเป๊ะๆ และดึงรูปปกมาใช้
+        search_url = f"https://store.steampowered.com/api/storesearch/?term={game_name}&cc=th&l=thai"
+        search_res = requests.get(search_url)
+        search_data = search_res.json()
+
+        if search_data.get('total') > 0:
+            # ดึงข้อมูลเกมอันดับแรกที่ค้นเจอ
+            best_match = search_data.get('items')[0]
+            real_game_name = best_match.get('name')
+            app_id = best_match.get('id')
+            image_url = f"https://cdn.cloudflare.steamstatic.com/steam/apps/{app_id}/header.jpg"
+            steam_link = f"https://store.steampowered.com/app/{app_id}"
+
+            # 2. สร้าง Prompt สั่งงาน AI ให้เป็นนักรีวิว
+            review_prompt = f"""
+            คุณคือนักวิจารณ์เกมที่เชี่ยวชาญและอธิบายเข้าใจง่าย
+            ช่วยเขียนสรุปรีวิวสำหรับเกม "{real_game_name}" สั้นๆ ให้อ่านง่าย
+            โดยบังคับให้ตอบตามโครงสร้าง 3 หัวข้อนี้เท่านั้น (ห้ามเกริ่นนำ ห้ามมีข้อความอื่น):
+            ✅ **จุดเด่น:** (อธิบายสั้นๆ 1-2 บรรทัด)
+            ❌ **จุดสังเกต:** (อธิบายสั้นๆ 1-2 บรรทัด)
+            🎯 **เหมาะกับใคร:** (เช่น เหมาะกับคนชอบเกมแนวไหน มีเวลาเล่นเยอะไหม)
+            """
+
+            # 3. ส่งคำสั่งให้ AI (ใช้ model เดิมที่ประกาศไว้ด้านบนได้เลย)
+            ai_response = model.generate_content(review_prompt)
+            review_text = ai_response.text.strip()
+
+            # 4. นำข้อความที่ AI สรุป มาใส่ลงในการ์ดสวยๆ
+            embed = discord.Embed(
+                title=f"📝 AI สรุปรีวิว: {real_game_name}",
+                description=review_text,
+                url=steam_link,
+                color=discord.Color.purple() # ใช้สีม่วงหรือสีอะไรก็ได้ที่ชอบ
+            )
+            embed.set_image(url=image_url)
+            embed.set_footer(text="รีวิวถูกสร้างขึ้นโดย Gemini AI")
+
+            # ส่งกลับไปที่ Discord
+            await interaction.followup.send(embed=embed)
+
+        else:
+            await interaction.followup.send(f"❌ บอทหาเกมชื่อ **{game_name}** ใน Steam ไม่เจอครับ ลองพิมพ์ชื่อให้เป๊ะขึ้นอีกนิดนะ")
+
+    except Exception as e:
+        await interaction.followup.send(f"❌ เกิดข้อผิดพลาดในการดึงข้อมูลรีวิว: {e}")
 
 # รันบอท
 bot.run(TOKEN)
